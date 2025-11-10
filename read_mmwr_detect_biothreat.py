@@ -1,6 +1,6 @@
-#### v4 ####
+#### v9 ####
 # First summarize and then extract
-# Extract all the disease and then find ongoing disease
+# Extract all the disease and then find ongoing bio threat
 # System prompt split
 
 #!/usr/bin/env pythonA
@@ -39,7 +39,7 @@ class LLMClient(ABC):
         self.max_tokens = max_tokens
 
     @abstractmethod
-    def call_chat_completion(self, prompt_system: str, prompt_user: str, temperature: float = 0.0):
+    def call_chat_completion(self, prompt_system: str, prompt_user: str, temperature: float = 0.0, top_p: float = 0.01):
         """
         Call the chat completion with a system prompt (instructions) 
         and a user prompt (the actual content or question).
@@ -56,16 +56,18 @@ class OpenAIClient(LLMClient):
             base_url=api_base,
             )
 
-    def call_chat_completion(self, prompt_system: str, prompt_user: str, temperature: float = 0.0):
+    def call_chat_completion(self, prompt_system: str, prompt_user: str, temperature: float = 0.0, top_p: float = 0.95):
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 temperature=temperature,
+                top_p=top_p,
                 messages=[
                     {"role": "system", "content": prompt_system},
                     {"role": "user", "content": prompt_user}
                 ]
             )
+            # print(f'top_p = {top_p}')
             return response.choices[0].message.content.strip() if response.choices else "NO RESPONSE"
         except Exception as e:
             print(f"Error: {e}")
@@ -85,6 +87,7 @@ class ArgoClient(LLMClient):
         try:
             # Argo does not use max_tokens, but we pass temperature if needed
             response = self.wrapper.invoke(prompt_system, prompt_user, temperature=temperature, top_p=top_p)
+            # print(f"[DEBUG] Full response: {response}")
             return response.get("response", "").strip()  # Ensure we extract the actual content
         except Exception as e:
             raise Exception(f"Argo API Error: {e}")
@@ -109,45 +112,47 @@ def get_llm_client(service: str, **kwargs):
 PROMPTS = {
     # 1) Chunk Summarization Prompt
     "chunk_summarization_system": """
-You are processing a chunk of a long, potentially unstructured report on disease outbreaks. 
-Your goal is to identify and extract distinct disease outbreaks, separated as precisely as possible by pathogen (separate different variants), time and location (based on the granularity available in the text). 
-Use your best judgment when details are missing.
+You are a meticulous data extractor specializing in epidemiology. Your task is to analyze a chunk of a long, potentially unstructured desiease report and extract information for every distinct outbreak.
 
+**Core Instructions:**
+- An outbreak is distinct if it involves a different pathogen/variant, a non-contiguous location, or a separate time period.
+- **Do not generalize or abridge information.** Your goal is to preserve all specific details provided in the text.
 
-Output Requirements
+**Output Requirements:**
 - If the time the report was written is stated, include it explicitly, respond with: 
   "Time of Report Written: <TimeOfReportWritten>"
 - For each distinct outbreak, output in the following format (repeat for each outbreak):
   "Disease Outbreak: <NameOfDisease>  
-   Cause of Infection: <Use one sentence to summarize possible pathogens and/or cause of infection of this outbreak>  
-   Location, Time, and Number of Infections: <One or two sentences summarizing time of infection,  detailed locations and case count in each location; use as specific information as available>  
-   Trend: <In one sentence, summarize developing trend of the outbreak at the time of report written (If ended? Prediction of spreading? Seasonal outbreak? etc.)>  
+   Cause of Infection: <One sentence summarizing the specific pathogens  and/or suspected transmission vector of this outbreak>  
+   Location, Time, and Cases: <Combine all available details of the outbreak's location, time, and case counts into a dense, fact-based description. 
+   Capture the most precise location possible, precise dates, and a full breakdown of case count and types (include infected people and any positive environmental samples that indicate potential for spread). 
+   Do not use more than 3 sentences.>  
+   Trend: <One sentence descriobing the developing trend of the outbreak at the time of report written (If ended? Prediction of spreading? Seasonal outbreak? etc.)>  
   "
 """,
 # 2) Chunk Summarization Prompt
     "summarization_system": """
-You are a helpful assistant. You are combining summaries from multiple chunks of a very large, possibly overlapping disease outbreak report, while: 
-- Keeping the total summary under 600 words
-- Including the time the report was written
-- Merging repeated reports of the exact same outbreak (same disease, same location, same time), 
-but retaining separate entries for distinct outbreaks (even if the disease is the same but the location or time differs)
+You are a data integrity specialist. You will be given several structured reports from different chunks of the same document. 
+Your task is to de-duplicate the list by merging reports that are about the same outbreak due to text overlap during document chunking, ensuring no details are lost.
 
-Output Requirements:
+**Output Requirements:**
 - At the very beginning, give the time of the report in the format: 
   "Time of Report Written: <TimeOfReportWritten>"
 - For each distinct outbreak, output in the following format (repeat for each outbreak):
-  "Disease Outbreak: <NameOfDisease> 
-  Cause of Infection: <Use one sentence to summarize possible pathogens and/or cause of infection of this outbreak>  
-   Location, Time, and Number of Infections: <One or two sentences summarizing detailed location, time of infection, and case count; use as specific information as available>  
-   Trend: <In one sentence, summarize developing trend of the outbreak at the time of report written (If ended? Prediction of spreading? Seasonal outbreak? etc.)>  
+  "Disease Outbreak: <NameOfDisease>  
+   Cause of Infection: <One sentence summarizing the specific pathogens  and/or suspected transmission vector of this outbreak>  
+   Location, Time, and Cases: <Combine all available details of the outbreak's location, time, and case counts into a dense, fact-based description. 
+   Capture the most precise location possible, precise dates, and a full breakdown of case count and types ((include infected people and any positive environmental samples that indicate potential for spread). 
+   Do not use more than 3 sentences.>  
+   Trend: <One sentence descriobing the developing trend of the outbreak at the time of report written (If ended? Prediction of spreading? Seasonal outbreak? etc.)>  
   "
 """,
-    # 2) Final Outbreak Detection Prompt
+    # 3) Final Outbreak Detection Prompt
     "find_risk_system": """
 You are an expert in epidemiology. Analyze a list of outbreaks from summarized disease report to identify any potential bio threat. 
 
-Criteria for "Potential Bio Threat":
-- Based on the infection time and trend of outbreak: it must be actively spreading and/or potentially emerging around the time of report written (not an ended or purely seasonal outbreak).
+**Criteria for "Potential Bio Threat":**
+- Based on the infection time and trend of outbreak, it must be actively spreading and/or potentially emerging around the time of report written (not an ended or purely seasonal outbreak).
 - Ignore any outbreak primarily caused by foodborne or drug use.
 - Its pathogen or biological agent (virus, bacterium, fungus, toxin, etc.) satisfies one of the following:
     1) a serious threat to humans, animals, or plants that can cause significant harm (e.g., high transmissibility, notable morbidity/mortality, or major societal disruption), or
@@ -171,12 +176,15 @@ Criteria for "Potential Bio Threat":
     - Yersinia pestis
     ...
 
-Output Requirements:
-- If any potential bio threat is detected in an outbreak, report pathogen, time, location and case numberas precisely as the input allows. If there are multiple locations reported, list all locations with reported case numbers separately. Use the following format (repeat for each distinct outbreak): 
-  "Potential risk: <NameOfPathogen> Time=<TimeOfOutbreak> Location=<Location1> (Infected=<Number1>) Location=<Location2> (Infected = <Number2>) ... "
-  (If time/number/location is not found,mark them as "unreported".)
-- If no potential bio threat is detected among all outbreaks, respond with exactly:
+**Output Requirements:**
+- For each outbreak idetified as a Potential Bio Threat, precisely report pathogen (include detailed variant name if available), time (finest time window available), detailed location and active case counts (include infected people and any positive environmental samples that indicate potential for spread). 
+  If there are multiple locations with, list each location with case breakdown separately. 
+  Use the following format (repeat for each distinct outbreak): 
+  "Potential risk: <NameOfPathogen> Time=<TimeOfOutbreak> Location=<Location1> (Cases=<Full case breakdown at Location1 (e.g., 84 cases, 12 sewage samples)>) Location=<Location2> (Cases=<Full case breakdown at Location2>) ..."
+  (If time/location/cases is not found, mark them as "unreported".)
+- If no potential bio threat is detected among all outbreaks, respond with the single word:
   "None"
+
 Note that "Potential risk" and "None" are mutually exclusive and should not occur together.
 """
 }       
@@ -199,7 +207,7 @@ def chunk_content(content: str, max_words_per_chunk: int) -> List[str]:
     return chunks
 
 
-def summarize_chunked_report(content: str, client: LLMClient, temperature: float = 0.0) -> str:
+def summarize_chunked_report(content: str, client: LLMClient, temperature: float = 0.0, top_p: float = 0.95) -> str:
     """
     1) Chunk the content
     2) Summarize each chunk
@@ -214,25 +222,30 @@ def summarize_chunked_report(content: str, client: LLMClient, temperature: float
         summary = client.call_chat_completion(
             prompt_system=PROMPTS["chunk_summarization_system"],
             prompt_user=chunk_text,
-            temperature=temperature
+            temperature=temperature,
+            top_p=top_p
         )
         chunk_summaries.append(summary)
 
     # Combine the chunk summaries
     report_summary = "\n".join(chunk_summaries)
 
+    if len(chunk_summaries) == 1:
+        summary_total = chunk_summaries[0]
+        print(len(chunk_summaries))
     # return report_summary
-
-    summary_total = client.call_chat_completion(
+    else: 
+        summary_total = client.call_chat_completion(
         prompt_system=PROMPTS["summarization_system"],
         prompt_user=report_summary,
-        temperature=temperature
+        temperature=temperature,
+        top_p=top_p
     )
 
     return summary_total
 
 
-def extract_outbreak_info(report_summary: str, client: LLMClient, temperature: float = 0.0) -> str:
+def extract_outbreak_info(report_summary: str, client: LLMClient, temperature: float = 0.0, top_p: float = 0.95) -> str:
     """
     Runs the final outbreak detection on the combined 'report_summary'.
     The system instructions specify how to respond.
@@ -242,7 +255,8 @@ def extract_outbreak_info(report_summary: str, client: LLMClient, temperature: f
     response = client.call_chat_completion(
         prompt_system=PROMPTS["find_risk_system"],
         prompt_user=report_summary,
-        temperature=temperature
+        temperature=temperature,
+        top_p=top_p
     )
     return response
 
@@ -263,7 +277,8 @@ def detect_disease(
     service: str = "globus",
     model: str = "meta-llama/Meta-Llama-3.1-8B-Instruct",
     num_iterations: int = 1,
-    temperature: float = 0.0
+    temperature: float = 0.0,
+    top_p: float = 0.01
     ) -> str:
     """
     1) Read the (potentially very long) disease report.
@@ -285,8 +300,7 @@ def detect_disease(
     # Construct the input file path dynamically
     input_file_path = f"txts/{MMWR}-H.txt"
 
-    # Initialize the LLM client
-    client = get_llm_client(service=service, model=model)
+    
 
     # Load file
     try:
@@ -296,14 +310,21 @@ def detect_disease(
         raise FileNotFoundError(f"Input file not found at {input_file_path}")
 
     iteration_results = []
+    report_summary_list = []
     for iteration in range(num_iterations):
+        # Initialize the LLM client
+        client = get_llm_client(service=service, model=model)
+
         print(f"\n[bold green]Iteration {iteration + 1}/{num_iterations}[/bold green]")
         # Summarize entire text in chunks
-        report_summary = summarize_chunked_report(full_report_text, client, temperature=temperature)
+        report_summary = summarize_chunked_report(full_report_text, client, temperature=temperature, top_p=top_p)
         print(f"[blue]Report summary:[/blue] {report_summary}")
+        report_summary_list.append(report_summary)
+
+        client = get_llm_client(service=service, model=model)
         
         # Extract outbreak info from the consolidated summary
-        risk_result = extract_outbreak_info(report_summary, client, temperature=temperature)
+        risk_result = extract_outbreak_info(report_summary, client, temperature=temperature, top_p=top_p)
         risk_result_cleaned = parse_risk_result(risk_result)
 
         # Print the iteration's result in a single, compact line
@@ -311,31 +332,9 @@ def detect_disease(
 
         iteration_results.append(risk_result_cleaned)
 
-    # 3) Aggregate answers
-    count_map = collections.Counter(iteration_results)
-    # Sort from most frequent to less
-    sorted_results = sorted(count_map.items(), key=lambda x: x[1], reverse=True)
-
-    # We only need the top and second top
-    top_answer, top_count = sorted_results[0]
-    # if len(sorted_results) > 1:
-    #     second_answer, second_count = sorted_results[1]
-    # else:
-    #     second_answer, second_count = "N/A", 0
-
-    # 4) Print Final
-    # print("\n[bold cyan]Final Aggregated Results[/bold cyan]")
-    # print(f"Top Answer: '{top_answer}' (count={top_count})")
-    # print(f"Second Answer: '{second_answer}' (count={second_count})")
-
-    # 5) Return "+" if top answer starts with "Potential risk", else "-"
-    if top_answer.lower().startswith("potential risk"):
-        pos_neg = "+"
-    else:
-        pos_neg = "-"
 
     results_dict = {"MMWR": MMWR,
-                    "pos/neg": pos_neg,
+                    "report_summary_list": report_summary_list,
                     "iteration_results": iteration_results
                     }
 
@@ -343,7 +342,9 @@ def detect_disease(
 
 
 if __name__ == '__main__':
-    # detect_disease("mm6742", service="globus", model="meta-llama/Meta-Llama-3.1-405B-Instruct", num_iterations=1, temperature=0.0)
-    detect_disease("mm6906", service="argo", model="gpt4o", num_iterations=1, temperature=0.0)
+    detect_disease("mm6711", service="globus", model="meta-llama/Meta-Llama-3.1-405B-Instruct", num_iterations=5, temperature=0.0, top_p=0.01)
+    # detect_disease("mm6711", service="argo", model="gpt4o", num_iterations=5, temperature=0.0, top_p=0.01)
     # detect_disease("mm6901", service="llama", model='meta-llama/Llama-3.3-70B-Instruct', num_iterations=1, temperature=0.0)
     # detect_disease("mm6901", service="deepseek", model='deepseekV3', num_iterations=1, temperature=0.0)
+    # Simple test script
+    
